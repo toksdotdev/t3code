@@ -1,0 +1,62 @@
+name: Build T3 Redesign
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: redesign-dogfood
+  cancel-in-progress: false
+jobs:
+  macos:
+    runs-on: macos-15
+    timeout-minutes: 60
+    env:
+      CSC_IDENTITY_AUTO_DISCOVERY: "false"
+      T3CODE_TELEMETRY_CHANNEL: dev
+      NODE_OPTIONS: --max-old-space-size=6144
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          sparse-checkout: |
+            /*
+            !/.repos/
+          sparse-checkout-cone-mode: false
+      - name: Isolate dogfood application
+        run: python3 .github/dogfood/prepare.py
+      - uses: ./.github/actions/setup-ci-deps
+        with:
+          install-args: --filter=t3... --filter=@t3tools/web... --filter=@t3tools/desktop... --filter=@t3tools/scripts...
+      - name: Set build version
+        run: |
+          base_version="$(node -p "require('./apps/desktop/package.json').version")"
+          echo "BUILD_VERSION=${base_version}-pr.28840.${GITHUB_RUN_NUMBER}" >> "$GITHUB_ENV"
+      - name: Build macOS arm64 application
+        run: vp run dist:desktop:artifact --platform mac --target dir --arch arm64 --build-version "$BUILD_VERSION" --output-dir release --verbose
+      - name: Launch packaged app and open fixture conversation
+        run: |
+          executable="$(find release -path '*/T3 Redesign.app/Contents/MacOS/T3 Redesign' -type f -print -quit)"
+          test -n "$executable"
+          node scripts/smoke-desktop-app.ts --executable "$executable" --artifacts-dir desktop-launch-check
+      - name: Archive application
+        run: |
+          app="$(find release -name 'T3 Redesign.app' -type d -prune -print -quit)"
+          test -n "$app"
+          ditto -c -k --sequesterRsrc --keepParent "$app" "T3-Redesign-${BUILD_VERSION}-arm64.zip"
+          shasum -a 256 T3-Redesign-*.zip > SHA256SUMS.txt
+          printf 'Fork commit: %s\nUpstream redesign: d5ffcad5246540d1655981dc5ac4a363d216d45f\nPRs: #28839 + #28840\nData: ~/.t3-redesign\nBrowser profile: ~/Library/Application Support/t3code-redesign\nUpdates: disabled\nSigning: not notarized\n' "$GITHUB_SHA" > BUILD-INFO.txt
+      - uses: actions/upload-artifact@v4
+        with:
+          name: T3-Redesign-macOS-arm64
+          path: |
+            T3-Redesign-*.zip
+            SHA256SUMS.txt
+            BUILD-INFO.txt
+          if-no-files-found: error
+          retention-days: 30
+      - uses: actions/upload-artifact@v4
+        if: failure()
+        with:
+          name: desktop-launch-diagnostics
+          path: desktop-launch-check
+          if-no-files-found: ignore
